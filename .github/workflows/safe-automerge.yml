@@ -1,0 +1,27 @@
+name: Safe Native Auto Merge
+on:
+  pull_request_target:
+    types: [labeled]
+permissions:
+  contents: read
+  pull-requests: write
+jobs:
+  arm-auto-merge:
+    if: github.event.label.name == 'safe-automerge' && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate conservative allowlist, never check out PR code
+        id: risk
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const pr = context.payload.pull_request;
+            const files = await github.paginate(github.rest.pulls.listFiles,{owner:context.repo.owner,repo:context.repo.repo,pull_number:pr.number,per_page:100});
+            const excluded = /(^|\/)(auth|guardian|consent|minor|payments?|billing|payroll|recording|quran|safeguard|secrets|migrations|infra|ops)(\/|\.|$)|(^|\/)\.github\/|^(package\.json|pnpm-lock\.yaml|composer\.json|composer\.lock|pubspec\.(yaml|lock))$/i;
+            const lowRisk = files.length > 0 && files.length <= 12 && files.every(f => !excluded.test(f.filename)) && pr.additions <= 300 && pr.deletions <= 100;
+            if (!lowRisk) core.setFailed('Not eligible for unattended auto-merge; obtain human review');
+      - name: Enable native GitHub auto-merge after required checks
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: gh pr merge --auto --squash '${{ github.event.pull_request.number }}'

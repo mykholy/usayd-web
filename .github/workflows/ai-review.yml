@@ -1,0 +1,56 @@
+name: Independent Gemini PR Review
+on:
+  pull_request:
+    types: [opened, reopened, synchronize, ready_for_review]
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+jobs:
+  independent-ai-review:
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Gemini structured review (fail closed)
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_MODEL: gemini-3.8-flash
+          ALLOW_EXTERNAL_AI_REVIEW: ${{ vars.ALLOW_EXTERNAL_AI_REVIEW }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: python automation/pr_review.py
+      - name: Evaluate auto-merge eligibility
+        id: auto-eligibility
+        if: success()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const result = JSON.parse(fs.readFileSync('review_output.json','utf8'));
+            if (result.status !== 'PASS') return;
+            const pr = context.payload.pull_request;
+            const files = await github.paginate(github.rest.pulls.listFiles,{owner:context.repo.owner,repo:context.repo.repo,pull_number:pr.number,per_page:100});
+            const excluded = /(^|\/)(auth|guardian|consent|minor|payments?|billing|payroll|recording|quran|safeguard|secrets|migrations|infra|ops)(\/|\.|$)|(^|\/)\.github\/|^(package\.json|pnpm-lock\.yaml|composer\.json|composer\.lock|pubspec\.(yaml|lock))$/i;
+            const eligible = files.length > 0 && files.length <= 12 && files.every(f => !excluded.test(f.filename)) && pr.additions <= 300 && pr.deletions <= 100;
+            core.setOutput('eligible', eligible ? 'true' : 'false');
+      - name: Enable native auto-merge for passing, non-sensitive PRs
+        if: success() && steps.auto-eligibility.outputs.eligible == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: gh pr merge --auto --squash '${{ github.event.pull_request.number }}'
+      - name: Publish review comment, even if blocked
+        if: always() && hashFiles('review_output.json') != ''
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const result = JSON.parse(fs.readFileSync('review_output.json','utf8'));
+            const parts = [`### Usayd Gemini review: ${result.status}`, result.error || '', ...result.findings.slice(0,15).map(x => `- **${x.severity}** \`${x.file}\`: ${x.message} — ${x.suggested_fix || ''}`)];
+            await github.rest.issues.createComment({owner:context.repo.owner,repo:context.repo.repo,issue_number:context.issue.number,body:parts.filter(Boolean).join('\n').slice(0,60000)});

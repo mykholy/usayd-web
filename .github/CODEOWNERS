@@ -1,0 +1,5 @@
+# Sensitive frontend or auth changes need human review
+/src/app/**/checkout/** @mykholy
+/src/app/**/guardian/** @mykholy
+/src/lib/auth/** @mykholy
+/.github/ @mykholy

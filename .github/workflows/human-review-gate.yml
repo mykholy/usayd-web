@@ -1,0 +1,36 @@
+name: Human Approval Gate
+on:
+  pull_request_target:
+    types: [opened, reopened, synchronize, ready_for_review]
+  pull_request_review:
+    types: [submitted, dismissed]
+permissions:
+  contents: read
+  pull-requests: read
+jobs:
+  human-approval-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify sensitive code has independent current human approval
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const prNumber = context.payload.pull_request?.number ?? context.payload.review?.pull_request_url?.match(/\/(\d+)$/)?.[1];
+            if (!prNumber) { core.setFailed('Cannot locate the PR'); return; }
+            const owner=context.repo.owner, repo=context.repo.repo;
+            const {data:pr}=await github.rest.pulls.get({owner,repo,pull_number:Number(prNumber)});
+            const files=await github.paginate(github.rest.pulls.listFiles,{owner,repo,pull_number:pr.number,per_page:100});
+            const sensitive=/(^|\/)(auth|guardian|consent|minor|payments?|billing|payroll|recording|quran|safeguard|secrets|migrations|infra|ops)(\/|\.|$)|(^|\/)\.github\/|^(package\.json|pnpm-lock\.yaml|composer\.json|composer\.lock|pubspec\.(yaml|lock))$/i;
+            if (!files.some(f=>sensitive.test(f.filename))) {core.info('No sensitive paths; AI+CI checks still apply');return;}
+            const reviews=await github.paginate(github.rest.pulls.listReviews,{owner,repo,pull_number:pr.number,per_page:100});
+            const byUser=new Map();
+            for (const r of reviews.sort((a,b)=>new Date(a.submitted_at)-new Date(b.submitted_at))) byUser.set(r.user.login,r);
+            let approved=false;
+            for (const [user,r] of byUser) {
+              if (user===pr.user.login || r.state!=='APPROVED' || r.commit_id!==pr.head.sha) continue;
+              try {
+                const x=await github.rest.repos.getCollaboratorPermissionLevel({owner,repo,username:user});
+                if (['write','maintain','admin'].includes(x.data.permission)) { approved=true; break; }
+              } catch(e) { core.warning(`Cannot verify reviewer ${user} permissions`); }
+            }
+            if (!approved) core.setFailed('Sensitive change requires current-commit approval from independent human with write permission');
